@@ -215,11 +215,31 @@ export class Stack {
         return exitCode;
     }
 
+    // Check if stack can be composed without errors
+    async checkStackCompose() : Promise<boolean> {
+        try {
+            let res = await childProcessAsync.spawn("docker", [ "compose", "ps", "--format", "json" ], {
+                cwd: this.path,
+                encoding: "utf-8",
+            });
+
+            return !res.stderr;
+        } catch (e) {
+            log.error("getServiceStatusList", "Stack can't be composed with current .yml file configuration");
+            return false;
+        }
+    }
+
     async delete(socket: DockgeSocket) : Promise<number> {
         const terminalName = getComposeTerminalName(socket.endpoint, this.name);
-        let exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", [ "compose", "down", "--remove-orphans" ], this.path);
-        if (exitCode !== 0) {
-            throw new Error("Failed to delete, please check the terminal output for more information.");
+        let exitCode = 0;
+
+        // Check if stack can be composed
+        if (await this.checkStackCompose()) {
+            exitCode = await Terminal.exec(this.server, socket, terminalName, "docker", [ "compose", "down", "--remove-orphans" ], this.path);
+            if (exitCode !== 0) {
+                throw new Error("Failed to delete, please check the terminal output for more information.");
+            }
         }
 
         // Remove the stack folder
@@ -500,29 +520,31 @@ export class Stack {
         let statusList = new Map<string, number>();
 
         try {
-            let res = await childProcessAsync.spawn("docker", [ "compose", "ps", "--format", "json" ], {
-                cwd: this.path,
-                encoding: "utf-8",
-            });
+            if (await this.checkStackCompose()) {
+                let res = await childProcessAsync.spawn("docker", [ "compose", "ps", "--format", "json" ], {
+                    cwd: this.path,
+                    encoding: "utf-8",
+                });
 
-            if (!res.stdout) {
+                if (!res.stdout) {
+                    return statusList;
+                }
+
+                let lines = res.stdout?.toString().split("\n");
+
+                for (let line of lines) {
+                    try {
+                        let obj = JSON.parse(line);
+                        if (obj.Health === "") {
+                            statusList.set(obj.Service, obj.State);
+                        } else {
+                            statusList.set(obj.Service, obj.Health);
+                        }
+                    } catch (e) {
+                    }
+                }
                 return statusList;
             }
-
-            let lines = res.stdout?.toString().split("\n");
-
-            for (let line of lines) {
-                try {
-                    let obj = JSON.parse(line);
-                    if (obj.Health === "") {
-                        statusList.set(obj.Service, obj.State);
-                    } else {
-                        statusList.set(obj.Service, obj.Health);
-                    }
-                } catch (e) {
-                }
-            }
-
             return statusList;
         } catch (e) {
             log.error("getServiceStatusList", e);
